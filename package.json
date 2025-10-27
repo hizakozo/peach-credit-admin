@@ -4,8 +4,13 @@
   "description": "",
   "main": "コード.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:ui": "vitest --ui",
     "build": "tsc",
+    "build:gas": "vite build && cp src/appsscript.json gas-dist/",
+    "push:gas": "clasp push --force",
+    "deploy:gas": "npm run build:gas && npm run push:gas",
     "check": "tsc --noEmit"
   },
   "keywords": [],
@@ -14,6 +19,9 @@
   "devDependencies": {
     "@google/clasp": "^3.1.0",
     "@types/google-apps-script": "^2.0.7",
-    "typescript": "^5.9.3"
+    "@vitest/ui": "^1.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.0.0",
+    "vitest": "^1.0.0"
   }
 }

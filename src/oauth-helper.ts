@@ -8,6 +8,96 @@
  * 4. コールバックURLのパラメータを使ってcompleteOAuthFlowを実行
  */
 
+import { ZaimApiDriver } from './driver/ZaimApiDriver';
+
+/**
+ * OAuth ヘルパー関数
+ */
+function generateNonce(): string {
+  return Utilities.base64Encode(Utilities.getUuid());
+}
+
+function getTimestamp(): string {
+  return Math.floor(new Date().getTime() / 1000).toString();
+}
+
+function percentEncode(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A');
+}
+
+function generateOAuthParams(
+  consumerKey: string,
+  token: string = ''
+): { [key: string]: string } {
+  const params: { [key: string]: string } = {
+    oauth_consumer_key: consumerKey,
+    oauth_signature_method: 'HMAC-SHA1',
+    oauth_timestamp: getTimestamp(),
+    oauth_nonce: generateNonce(),
+    oauth_version: '1.0'
+  };
+
+  if (token) {
+    params.oauth_token = token;
+  }
+
+  return params;
+}
+
+function generateSignatureBaseString(
+  method: string,
+  url: string,
+  params: { [key: string]: string }
+): string {
+  const sortedKeys = Object.keys(params).sort();
+  const paramString = sortedKeys
+    .map(key => `${percentEncode(key)}=${percentEncode(params[key])}`)
+    .join('&');
+
+  return `${method}&${percentEncode(url)}&${percentEncode(paramString)}`;
+}
+
+function generateSignature(
+  baseString: string,
+  consumerSecret: string,
+  tokenSecret: string = ''
+): string {
+  const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(tokenSecret)}`;
+  const signature = Utilities.computeHmacSignature(
+    Utilities.MacAlgorithm.HMAC_SHA_1,
+    baseString,
+    signingKey
+  );
+  return Utilities.base64Encode(signature);
+}
+
+/**
+ * Zaim API 呼び出しヘルパー
+ */
+function callZaimAPI(
+  url: string,
+  method: string,
+  queryParams: { [key: string]: string }
+): any {
+  const driver = new ZaimApiDriver();
+  return driver['callZaimAPI'](url, method, queryParams);
+}
+
+function getZaimAccounts(): any {
+  const driver = new ZaimApiDriver();
+  return driver.getAccounts();
+}
+
+function getZaimMoney(accountId?: string): any {
+  const driver = new ZaimApiDriver();
+  return driver.getTransactions(accountId);
+}
+
 /**
  * Step 1: OAuth認証フローを開始
  * Request Tokenを取得して認証URLを表示
@@ -401,4 +491,16 @@ function setupConsumerCredentials(consumerKey: string, consumerSecret: string): 
   Logger.log(`ZAIM_CONSUMER_KEY: ${consumerKey}`);
   Logger.log('');
   Logger.log('次にstartOAuthFlowを実行してください');
+}
+
+// Export functions to global scope for GAS
+if (typeof globalThis !== 'undefined') {
+  (globalThis as any).startOAuthFlow = startOAuthFlow;
+  (globalThis as any).runCompleteOAuthFlow = runCompleteOAuthFlow;
+  (globalThis as any).completeOAuthFlow = completeOAuthFlow;
+  (globalThis as any).testZaimConnection = testZaimConnection;
+  (globalThis as any).debugGetAccounts = debugGetAccounts;
+  (globalThis as any).debugGetAllMoney = debugGetAllMoney;
+  (globalThis as any).debugGetRakutenMoney = debugGetRakutenMoney;
+  (globalThis as any).setupConsumerCredentials = setupConsumerCredentials;
 }
