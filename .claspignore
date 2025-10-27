@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/**
+package-lock.json
+
+# Config files
+tsconfig.json
+package.json
+
+# Git
+.git/**
+.gitignore
+
+# IDE
+.idea/**
+.vscode/**
+
+# Documentation
+*.md
+
+# Backup
+_backup/**
+
+# Other
+.DS_Store
+.clasp.json
