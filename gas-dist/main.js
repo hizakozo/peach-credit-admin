@@ -125,6 +125,78 @@
       UrlFetchApp.fetch(this.LINE_URL, options);
     }
   }
+  class SpreadsheetDriver {
+    constructor() {
+      this.sheetName = "AdvancePayments";
+      this.spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID") || "";
+      if (!this.spreadsheetId) {
+        throw new Error("SPREADSHEET_ID is not set in script properties");
+      }
+    }
+    /**
+     * シートを取得（存在しない場合は作成）
+     */
+    getOrCreateSheet() {
+      const spreadsheet = SpreadsheetApp.openById(this.spreadsheetId);
+      let sheet = spreadsheet.getSheetByName(this.sheetName);
+      if (!sheet) {
+        sheet = spreadsheet.insertSheet(this.sheetName);
+        sheet.appendRow(["ID", "Date", "Payer", "Amount", "Memo", "CreatedAt"]);
+        sheet.getRange(1, 1, 1, 6).setFontWeight("bold");
+      }
+      return sheet;
+    }
+    /**
+     * 全ての行を取得
+     */
+    getAllRows() {
+      const sheet = this.getOrCreateSheet();
+      const lastRow = sheet.getLastRow();
+      if (lastRow <= 1) {
+        return [];
+      }
+      const data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+      return data.map((row) => ({
+        id: String(row[0]),
+        date: String(row[1]),
+        payer: String(row[2]),
+        amount: Number(row[3]),
+        memo: String(row[4]),
+        createdAt: String(row[5])
+      }));
+    }
+    /**
+     * 行を追加
+     */
+    appendRow(row) {
+      const sheet = this.getOrCreateSheet();
+      sheet.appendRow([
+        row.id,
+        row.date,
+        row.payer,
+        row.amount,
+        row.memo,
+        row.createdAt
+      ]);
+    }
+    /**
+     * 指定されたIDの行を削除
+     */
+    deleteRowById(id) {
+      const sheet = this.getOrCreateSheet();
+      const lastRow = sheet.getLastRow();
+      if (lastRow <= 1) {
+        return;
+      }
+      const data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (let i = 0; i < data.length; i++) {
+        if (String(data[i][0]) === id) {
+          sheet.deleteRow(i + 2);
+          return;
+        }
+      }
+    }
+  }
   class Money {
     constructor(amount) {
       if (amount < 0) {
@@ -219,6 +291,112 @@
       return transactions.reduce((sum, transaction) => sum + transaction.amount, 0);
     }
   }
+  class AdvancePayment {
+    constructor(id, date, payer, amount, memo) {
+      this.id = id;
+      this.date = date;
+      this.payer = payer;
+      this.amount = amount;
+      this.memo = memo;
+    }
+    getId() {
+      return this.id;
+    }
+    getDate() {
+      return this.date;
+    }
+    getPayer() {
+      return this.payer;
+    }
+    getAmount() {
+      return this.amount;
+    }
+    getMemo() {
+      return this.memo;
+    }
+    /**
+     * 日付を "YYYY-MM-DD" 形式で取得
+     */
+    getFormattedDate() {
+      const year = this.date.getFullYear();
+      const month = String(this.date.getMonth() + 1).padStart(2, "0");
+      const day = String(this.date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
+    /**
+     * 指定された年月の記録かどうかを判定
+     */
+    isInMonth(year, month) {
+      return this.date.getFullYear() === year && this.date.getMonth() + 1 === month;
+    }
+  }
+  const _Payer = class _Payer {
+    constructor(value) {
+      this.value = value;
+    }
+    getValue() {
+      return this.value;
+    }
+    equals(other) {
+      return this.value === other.value;
+    }
+    /**
+     * 文字列から Payer を生成
+     */
+    static fromString(value) {
+      if (value === "夫") return _Payer.HUSBAND;
+      if (value === "妻") return _Payer.WIFE;
+      throw new Error(`Invalid payer value: ${value}`);
+    }
+  };
+  _Payer.HUSBAND = new _Payer("夫");
+  _Payer.WIFE = new _Payer("妻");
+  let Payer = _Payer;
+  class AdvancePaymentRepositoryImpl {
+    constructor(spreadsheetDriver) {
+      this.spreadsheetDriver = spreadsheetDriver;
+    }
+    /**
+     * SpreadsheetRow を AdvancePayment に変換
+     */
+    rowToAdvancePayment(row) {
+      return new AdvancePayment(
+        row.id,
+        new Date(row.date),
+        Payer.fromString(row.payer),
+        new Money(row.amount),
+        row.memo
+      );
+    }
+    /**
+     * AdvancePayment を SpreadsheetRow に変換
+     */
+    advancePaymentToRow(payment) {
+      return {
+        id: payment.getId(),
+        date: payment.getFormattedDate(),
+        payer: payment.getPayer().getValue(),
+        amount: payment.getAmount().getValue(),
+        memo: payment.getMemo(),
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    findAll() {
+      const rows = this.spreadsheetDriver.getAllRows();
+      return rows.map((row) => this.rowToAdvancePayment(row));
+    }
+    findByYearMonth(year, month) {
+      const all = this.findAll();
+      return all.filter((payment) => payment.isInMonth(year, month));
+    }
+    add(payment) {
+      const row = this.advancePaymentToRow(payment);
+      this.spreadsheetDriver.appendRow(row);
+    }
+    delete(id) {
+      this.spreadsheetDriver.deleteRowById(id);
+    }
+  }
   class MonthlySettlement {
     constructor(yearMonth, husbandAmount, wifeAmount) {
       this.yearMonth = yearMonth;
@@ -282,6 +460,82 @@
       return settlement;
     }
   }
+  class GetAdvancePaymentsUseCase {
+    constructor(repository) {
+      this.repository = repository;
+    }
+    /**
+     * 指定された年月の建て替え記録を取得
+     */
+    execute(year, month) {
+      return this.repository.findByYearMonth(year, month);
+    }
+  }
+  class AddAdvancePaymentUseCase {
+    constructor(repository) {
+      this.repository = repository;
+    }
+    /**
+     * 建て替え記録を追加
+     */
+    execute(date, payer, amount, memo) {
+      const id = Date.now().toString();
+      const payment = new AdvancePayment(
+        id,
+        date,
+        payer,
+        new Money(amount),
+        memo
+      );
+      this.repository.add(payment);
+    }
+  }
+  class DeleteAdvancePaymentUseCase {
+    constructor(repository) {
+      this.repository = repository;
+    }
+    /**
+     * 建て替え記録を削除
+     */
+    execute(id) {
+      this.repository.delete(id);
+    }
+  }
+  class CalculateSettlementUseCase {
+    constructor(repository) {
+      this.repository = repository;
+    }
+    /**
+     * 指定された年月の精算を計算
+     * 多く払った方から少なく払った方への精算額を計算
+     */
+    execute(year, month) {
+      const payments = this.repository.findByYearMonth(year, month);
+      let husbandTotal = 0;
+      let wifeTotal = 0;
+      for (const payment of payments) {
+        const amount = payment.getAmount().getValue();
+        if (payment.getPayer().equals(Payer.HUSBAND)) {
+          husbandTotal += amount;
+        } else if (payment.getPayer().equals(Payer.WIFE)) {
+          wifeTotal += amount;
+        }
+      }
+      const diff = Math.abs(husbandTotal - wifeTotal);
+      let settlementPayer = null;
+      if (husbandTotal > wifeTotal) {
+        settlementPayer = Payer.WIFE;
+      } else if (wifeTotal > husbandTotal) {
+        settlementPayer = Payer.HUSBAND;
+      }
+      return {
+        husbandTotal: new Money(husbandTotal),
+        wifeTotal: new Money(wifeTotal),
+        settlementAmount: new Money(diff),
+        settlementPayer
+      };
+    }
+  }
   class YearMonth {
     constructor(year, month) {
       if (year < 0) {
@@ -342,6 +596,19 @@
           const currentYearMonth = YearMonth.fromDate(/* @__PURE__ */ new Date());
           const settlement = await this.getCreditCardAmountUseCase.execute(currentYearMonth);
           responseMessage = settlement.formatMessage();
+        } else if (messageText.includes("建て替え")) {
+          try {
+            const webAppUrl = PropertiesService.getScriptProperties().getProperty("WEB_APP_URL");
+            if (webAppUrl) {
+              responseMessage = `建て替え記録アプリ:
+${webAppUrl}`;
+            } else {
+              responseMessage = "建て替え記録アプリのURLが設定されていません。\nGASエディタでsetupWebAppUrlを実行してください。";
+            }
+          } catch (error) {
+            Logger.log(`Error getting web app URL: ${error}`);
+            responseMessage = "建て替え記録アプリのURL取得に失敗しました。";
+          }
         } else if (messageText.toLowerCase().includes("hello")) {
           responseMessage = "hello";
         }
@@ -380,6 +647,60 @@
         Logger.log(`エラー発生: ${error}`);
         throw error;
       }
+    }
+  }
+  class AdvancePaymentHtmlHandler {
+    constructor(getPaymentsUseCase, addPaymentUseCase, deletePaymentUseCase, calculateSettlementUseCase) {
+      this.getPaymentsUseCase = getPaymentsUseCase;
+      this.addPaymentUseCase = addPaymentUseCase;
+      this.deletePaymentUseCase = deletePaymentUseCase;
+      this.calculateSettlementUseCase = calculateSettlementUseCase;
+    }
+    /**
+     * 今月の建て替え記録一覧を取得（クライアント側から呼ばれる）
+     */
+    getPayments() {
+      const now = /* @__PURE__ */ new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth() + 1;
+      const payments = this.getPaymentsUseCase.execute(year, month);
+      return payments.map((payment) => ({
+        id: payment.getId(),
+        date: payment.getFormattedDate(),
+        payer: payment.getPayer().getValue(),
+        amount: payment.getAmount().getValue(),
+        memo: payment.getMemo()
+      }));
+    }
+    /**
+     * 精算計算（クライアント側から呼ばれる）
+     */
+    getSettlement() {
+      var _a;
+      const now = /* @__PURE__ */ new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth() + 1;
+      const result = this.calculateSettlementUseCase.execute(year, month);
+      return {
+        husbandTotal: result.husbandTotal.getValue(),
+        wifeTotal: result.wifeTotal.getValue(),
+        settlementAmount: result.settlementAmount.getValue(),
+        settlementPayer: ((_a = result.settlementPayer) == null ? void 0 : _a.getValue()) || null
+      };
+    }
+    /**
+     * 建て替え記録を追加（クライアント側から呼ばれる）
+     */
+    addPayment(date, payer, amount, memo) {
+      const payerObj = Payer.fromString(payer);
+      const dateObj = new Date(date);
+      this.addPaymentUseCase.execute(dateObj, payerObj, amount, memo);
+    }
+    /**
+     * 建て替え記録を削除（クライアント側から呼ばれる）
+     */
+    deletePayment(id) {
+      this.deletePaymentUseCase.execute(id);
     }
   }
   function generateNonce() {
@@ -707,7 +1028,149 @@
     globalThis.setupConsumerCredentials = setupConsumerCredentials;
   }
   function doGet() {
-    return HtmlService.createHtmlOutput("<h1>Hello from TypeScript!</h1>");
+    const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>建て替え記録</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background-color: #f5f5f5; padding: 20px; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    h1 { font-size: 24px; margin-bottom: 20px; color: #333; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; color: #555; font-size: 14px; }
+    input, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+    button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background-color: #0056b3; }
+    button.delete { background-color: #dc3545; padding: 5px 10px; font-size: 12px; }
+    button.delete:hover { background-color: #c82333; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+    th { background-color: #f8f9fa; font-weight: 600; color: #333; }
+    .settlement { background-color: #f8f9fa; padding: 15px; border-radius: 4px; margin-top: 20px; }
+    .settlement-title { font-weight: 600; margin-bottom: 10px; color: #333; }
+    .settlement-result { font-size: 18px; color: #007bff; margin-top: 5px; }
+    .loading { text-align: center; padding: 20px; color: #999; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 id="title">建て替え記録</h1>
+    <form id="add-form">
+      <div class="form-group">
+        <label>日付</label>
+        <input type="date" id="date" required>
+      </div>
+      <div class="form-group">
+        <label>支払者</label>
+        <select id="payer" required>
+          <option value="夫">夫</option>
+          <option value="妻">妻</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>金額</label>
+        <input type="number" id="amount" required min="0" step="1">
+      </div>
+      <div class="form-group">
+        <label>メモ</label>
+        <input type="text" id="memo" required placeholder="例: ランチ代">
+      </div>
+      <button type="submit">追加</button>
+    </form>
+    <div class="settlement" id="settlement">
+      <div class="loading">精算情報を読み込み中...</div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>日付</th><th>支払者</th><th>金額</th><th>メモ</th><th></th></tr>
+      </thead>
+      <tbody id="payment-list">
+        <tr><td colspan="5" class="loading">記録を読み込み中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <script>
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    document.getElementById('title').textContent = \`建て替え記録 - \${year}年\${month}月\`;
+    document.getElementById('date').valueAsDate = now;
+
+    function loadPayments() {
+      google.script.run.withSuccessHandler(function(payments) {
+        const tbody = document.getElementById('payment-list');
+        if (payments.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#999;">記録がありません</td></tr>';
+        } else {
+          tbody.innerHTML = payments.map(p => \`
+            <tr>
+              <td>\${p.date}</td>
+              <td>\${p.payer}</td>
+              <td>\${p.amount.toLocaleString()}円</td>
+              <td>\${p.memo}</td>
+              <td><button class="delete" onclick="deletePayment('\${p.id}')">削除</button></td>
+            </tr>
+          \`).join('');
+        }
+      }).withFailureHandler(function(error) {
+        alert('読み込みエラー: ' + error.message);
+      }).getPayments();
+    }
+
+    function loadSettlement() {
+      google.script.run.withSuccessHandler(function(result) {
+        const div = document.getElementById('settlement');
+        let message = \`
+          <div class="settlement-title">今月の精算</div>
+          <div>夫: \${result.husbandTotal.toLocaleString()}円</div>
+          <div>妻: \${result.wifeTotal.toLocaleString()}円</div>
+        \`;
+        if (result.settlementPayer) {
+          message += \`<div class="settlement-result">\${result.settlementPayer}が\${result.settlementAmount.toLocaleString()}円を支払う</div>\`;
+        } else {
+          message += \`<div class="settlement-result">精算不要</div>\`;
+        }
+        div.innerHTML = message;
+      }).withFailureHandler(function(error) {
+        document.getElementById('settlement').innerHTML = '<div>精算情報の読み込みに失敗しました</div>';
+      }).getSettlement();
+    }
+
+    function deletePayment(id) {
+      if (!confirm('この記録を削除しますか？')) return;
+      google.script.run.withSuccessHandler(function() {
+        loadPayments();
+        loadSettlement();
+      }).withFailureHandler(function(error) {
+        alert('削除エラー: ' + error.message);
+      }).deletePayment(id);
+    }
+
+    document.getElementById('add-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const date = document.getElementById('date').value;
+      const payer = document.getElementById('payer').value;
+      const amount = parseInt(document.getElementById('amount').value);
+      const memo = document.getElementById('memo').value;
+      google.script.run.withSuccessHandler(function() {
+        document.getElementById('add-form').reset();
+        document.getElementById('date').valueAsDate = new Date();
+        loadPayments();
+        loadSettlement();
+      }).withFailureHandler(function(error) {
+        alert('追加エラー: ' + error.message);
+      }).addPayment(date, payer, amount, memo);
+    });
+
+    loadPayments();
+    loadSettlement();
+  <\/script>
+</body>
+</html>`;
+    return HtmlService.createHtmlOutput(htmlContent).setTitle("建て替え記録").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
   function doPost(e) {
     const zaimApiDriver = new ZaimApiDriver();
@@ -726,9 +1189,84 @@
     const handler = new TestHandler(useCase);
     handler.execute();
   }
+  function setupSpreadsheetId() {
+    const spreadsheetId = "YOUR_SPREADSHEET_ID";
+    PropertiesService.getScriptProperties().setProperty("SPREADSHEET_ID", spreadsheetId);
+    Logger.log(`Spreadsheet ID was set: ${spreadsheetId}`);
+  }
+  function setupWebAppUrl() {
+    const webAppUrl = "YOUR_WEB_APP_URL";
+    PropertiesService.getScriptProperties().setProperty("WEB_APP_URL", webAppUrl);
+    Logger.log(`Web App URL was set: ${webAppUrl}`);
+  }
+  function getPayments() {
+    const spreadsheetDriver = new SpreadsheetDriver();
+    const repository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+    const useCase = new GetAdvancePaymentsUseCase(repository);
+    const handler = new AdvancePaymentHtmlHandler(
+      useCase,
+      new AddAdvancePaymentUseCase(repository),
+      new DeleteAdvancePaymentUseCase(repository),
+      new CalculateSettlementUseCase(repository)
+    );
+    return handler.getPayments();
+  }
+  function getSettlement() {
+    const spreadsheetDriver = new SpreadsheetDriver();
+    const repository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+    const useCase = new CalculateSettlementUseCase(repository);
+    const handler = new AdvancePaymentHtmlHandler(
+      new GetAdvancePaymentsUseCase(repository),
+      new AddAdvancePaymentUseCase(repository),
+      new DeleteAdvancePaymentUseCase(repository),
+      useCase
+    );
+    return handler.getSettlement();
+  }
+  function addPayment(date, payer, amount, memo) {
+    const spreadsheetDriver = new SpreadsheetDriver();
+    const repository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+    const useCase = new AddAdvancePaymentUseCase(repository);
+    const handler = new AdvancePaymentHtmlHandler(
+      new GetAdvancePaymentsUseCase(repository),
+      useCase,
+      new DeleteAdvancePaymentUseCase(repository),
+      new CalculateSettlementUseCase(repository)
+    );
+    handler.addPayment(date, payer, amount, memo);
+  }
+  function deletePayment(id) {
+    const spreadsheetDriver = new SpreadsheetDriver();
+    const repository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+    const useCase = new DeleteAdvancePaymentUseCase(repository);
+    const handler = new AdvancePaymentHtmlHandler(
+      new GetAdvancePaymentsUseCase(repository),
+      new AddAdvancePaymentUseCase(repository),
+      useCase,
+      new CalculateSettlementUseCase(repository)
+    );
+    handler.deletePayment(id);
+  }
   if (typeof globalThis !== "undefined") {
     globalThis.doGet = doGet;
     globalThis.doPost = doPost;
     globalThis.testHandleZaimMessage = testHandleZaimMessage;
+    globalThis.setupSpreadsheetId = setupSpreadsheetId;
+    globalThis.setupWebAppUrl = setupWebAppUrl;
+    globalThis.getPayments = getPayments;
+    globalThis.getSettlement = getSettlement;
+    globalThis.addPayment = addPayment;
+    globalThis.deletePayment = deletePayment;
   }
 })();
+
+// Export GasApp functions to global scope for GAS
+var doGet = GasApp.doGet;
+var doPost = GasApp.doPost;
+var testHandleZaimMessage = GasApp.testHandleZaimMessage;
+var setupSpreadsheetId = GasApp.setupSpreadsheetId;
+var setupWebAppUrl = GasApp.setupWebAppUrl;
+var getPayments = GasApp.getPayments;
+var getSettlement = GasApp.getSettlement;
+var addPayment = GasApp.addPayment;
+var deletePayment = GasApp.deletePayment;

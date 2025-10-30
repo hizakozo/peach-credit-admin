@@ -34,6 +34,19 @@ export class LineWebhookHandler {
         const currentYearMonth = YearMonth.fromDate(new Date());
         const settlement = await this.getCreditCardAmountUseCase.execute(currentYearMonth);
         responseMessage = settlement.formatMessage();
+      } else if (messageText.includes('建て替え')) {
+        // 建て替え記録HTMLアプリのURLを返信
+        try {
+          const webAppUrl = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
+          if (webAppUrl) {
+            responseMessage = `建て替え記録アプリ:\n${webAppUrl}`;
+          } else {
+            responseMessage = '建て替え記録アプリのURLが設定されていません。\nGASエディタでsetupWebAppUrlを実行してください。';
+          }
+        } catch (error) {
+          Logger.log(`Error getting web app URL: ${error}`);
+          responseMessage = '建て替え記録アプリのURL取得に失敗しました。';
+        }
       } else if (messageText.toLowerCase().includes('hello')) {
         responseMessage = 'hello';
       }
