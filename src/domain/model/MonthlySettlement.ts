@@ -8,12 +8,17 @@ import { YearMonth } from './YearMonth';
 export class MonthlySettlement {
   constructor(
     private readonly yearMonth: YearMonth,
+    private readonly creditCardTotal: Money,
     private readonly husbandAmount: Money,
     private readonly wifeAmount: Money
   ) {}
 
   getYearMonth(): YearMonth {
     return this.yearMonth;
+  }
+
+  getCreditCardTotal(): Money {
+    return this.creditCardTotal;
   }
 
   getHusbandAmount(): Money {
@@ -39,7 +44,8 @@ export class MonthlySettlement {
   formatMessage(): string {
     return (
       '💳 今月の支払い金額が確定しました\n\n' +
-      `【${this.yearMonth.format()}分】\n\n` +
+      `【${this.yearMonth.format()}支払い分】\n\n` +
+      `カード合計: ${this.creditCardTotal.format()}\n\n` +
       `👨 ${this.husbandAmount.format()}\n` +
       `👩 ${this.wifeAmount.format()}`
     );

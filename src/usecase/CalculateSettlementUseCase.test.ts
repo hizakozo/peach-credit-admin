@@ -13,6 +13,7 @@ describe('CalculateSettlementUseCase', () => {
     mockRepository = {
       findAll: vi.fn(),
       findByYearMonth: vi.fn(),
+      findByDateRange: vi.fn(),
       add: vi.fn(),
       delete: vi.fn(),
     };

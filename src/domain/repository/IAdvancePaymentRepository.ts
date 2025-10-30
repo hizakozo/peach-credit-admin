@@ -16,6 +16,13 @@ export interface IAdvancePaymentRepository {
   findByYearMonth(year: number, month: number): AdvancePayment[];
 
   /**
+   * 指定された日付範囲の建て替え記録を取得
+   * @param startDate 開始日（含む）
+   * @param endDate 終了日（含む）
+   */
+  findByDateRange(startDate: Date, endDate: Date): AdvancePayment[];
+
+  /**
    * 建て替え記録を追加
    */
   add(payment: AdvancePayment): void;

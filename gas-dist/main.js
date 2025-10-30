@@ -104,25 +104,36 @@
      * @param message 送信するメッセージ
      */
     replyMessage(replyToken, message) {
-      const lineToken = PropertiesService.getScriptProperties().getProperty("LINE_CHANNEL_ACCESS_TOKEN");
-      if (!lineToken) {
-        throw new Error("LINE_CHANNEL_ACCESS_TOKEN not configured in Script Properties");
+      try {
+        Logger.log(`[LineMessagingDriver] Sending message: ${message}`);
+        Logger.log(`[LineMessagingDriver] replyToken: ${replyToken}`);
+        const lineToken = PropertiesService.getScriptProperties().getProperty("LINE_CHANNEL_ACCESS_TOKEN");
+        Logger.log(`[LineMessagingDriver] LINE_CHANNEL_ACCESS_TOKEN exists: ${!!lineToken}`);
+        if (!lineToken) {
+          throw new Error("LINE_CHANNEL_ACCESS_TOKEN not configured in Script Properties");
+        }
+        const options = {
+          headers: {
+            "Content-Type": "application/json; charset=UTF-8",
+            "Authorization": "Bearer " + lineToken
+          },
+          method: "post",
+          payload: JSON.stringify({
+            replyToken,
+            messages: [{
+              type: "text",
+              text: message
+            }]
+          })
+        };
+        const response = UrlFetchApp.fetch(this.LINE_URL, options);
+        Logger.log(`[LineMessagingDriver] Response code: ${response.getResponseCode()}`);
+        Logger.log(`[LineMessagingDriver] Response: ${response.getContentText()}`);
+      } catch (error) {
+        Logger.log(`[LineMessagingDriver] Error: ${error}`);
+        Logger.log(`[LineMessagingDriver] Stack: ${error.stack || "No stack"}`);
+        throw error;
       }
-      const options = {
-        headers: {
-          "Content-Type": "application/json; charset=UTF-8",
-          "Authorization": "Bearer " + lineToken
-        },
-        method: "post",
-        payload: JSON.stringify({
-          replyToken,
-          messages: [{
-            type: "text",
-            text: message
-          }]
-        })
-      };
-      UrlFetchApp.fetch(this.LINE_URL, options);
     }
   }
   class SpreadsheetDriver {
@@ -389,6 +400,13 @@
       const all = this.findAll();
       return all.filter((payment) => payment.isInMonth(year, month));
     }
+    findByDateRange(startDate, endDate) {
+      const all = this.findAll();
+      return all.filter((payment) => {
+        const paymentDate = payment.getDate();
+        return paymentDate >= startDate && paymentDate <= endDate;
+      });
+    }
     add(payment) {
       const row = this.advancePaymentToRow(payment);
       this.spreadsheetDriver.appendRow(row);
@@ -398,13 +416,17 @@
     }
   }
   class MonthlySettlement {
-    constructor(yearMonth, husbandAmount, wifeAmount) {
+    constructor(yearMonth, creditCardTotal, husbandAmount, wifeAmount) {
       this.yearMonth = yearMonth;
+      this.creditCardTotal = creditCardTotal;
       this.husbandAmount = husbandAmount;
       this.wifeAmount = wifeAmount;
     }
     getYearMonth() {
       return this.yearMonth;
+    }
+    getCreditCardTotal() {
+      return this.creditCardTotal;
     }
     getHusbandAmount() {
       return this.husbandAmount;
@@ -426,7 +448,9 @@
     formatMessage() {
       return `💳 今月の支払い金額が確定しました
 
-【${this.yearMonth.format()}分】
+【${this.yearMonth.format()}支払い分】
+
+カード合計: ${this.creditCardTotal.format()}
 
 👨 ${this.husbandAmount.format()}
 👩 ${this.wifeAmount.format()}`;
@@ -441,7 +465,7 @@
      */
     calculate(yearMonth, totalAmount) {
       const halfAmount = totalAmount.divide(2);
-      return new MonthlySettlement(yearMonth, halfAmount, halfAmount);
+      return new MonthlySettlement(yearMonth, totalAmount, halfAmount, halfAmount);
     }
   }
   class GetCreditCardAmountUseCase {
@@ -574,8 +598,9 @@
     }
   }
   class LineWebhookHandler {
-    constructor(getCreditCardAmountUseCase, lineMessagingDriver) {
+    constructor(getCreditCardAmountUseCase, advancePaymentRepository, lineMessagingDriver) {
       this.getCreditCardAmountUseCase = getCreditCardAmountUseCase;
+      this.advancePaymentRepository = advancePaymentRepository;
       this.lineMessagingDriver = lineMessagingDriver;
     }
     /**
@@ -593,21 +618,25 @@
         const messageText = ((_a = event.message) == null ? void 0 : _a.text) || "";
         let responseMessage = null;
         if (messageText.includes("支払")) {
-          const currentYearMonth = YearMonth.fromDate(/* @__PURE__ */ new Date());
-          const settlement = await this.getCreditCardAmountUseCase.execute(currentYearMonth);
+          const yearMonth = this.extractYearMonth(messageText);
+          const settlement = await this.getCreditCardAmountUseCase.execute(yearMonth);
           responseMessage = settlement.formatMessage();
         } else if (messageText.includes("建て替え")) {
-          try {
-            const webAppUrl = PropertiesService.getScriptProperties().getProperty("WEB_APP_URL");
-            if (webAppUrl) {
-              responseMessage = `建て替え記録アプリ:
+          if (this.hasMonthSpecification(messageText)) {
+            responseMessage = this.formatAdvancePaymentRecords(messageText);
+          } else {
+            try {
+              const webAppUrl = PropertiesService.getScriptProperties().getProperty("WEB_APP_URL");
+              if (webAppUrl) {
+                responseMessage = `建て替え記録アプリ:
 ${webAppUrl}`;
-            } else {
-              responseMessage = "建て替え記録アプリのURLが設定されていません。\nGASエディタでsetupWebAppUrlを実行してください。";
+              } else {
+                responseMessage = "建て替え記録アプリのURLが設定されていません。\nGASエディタでsetupWebAppUrlを実行してください。";
+              }
+            } catch (error) {
+              Logger.log(`Error getting web app URL: ${error}`);
+              responseMessage = "建て替え記録アプリのURL取得に失敗しました。";
             }
-          } catch (error) {
-            Logger.log(`Error getting web app URL: ${error}`);
-            responseMessage = "建て替え記録アプリのURL取得に失敗しました。";
           }
         } else if (messageText.toLowerCase().includes("hello")) {
           responseMessage = "hello";
@@ -617,8 +646,125 @@ ${webAppUrl}`;
         }
       } catch (error) {
         Logger.log(`Error in LineWebhookHandler: ${error}`);
-        throw error;
+        try {
+          const json = JSON.parse(postData);
+          const event = json.events[0];
+          if (event && event.replyToken) {
+            const errorMessage = `エラーが発生しました:
+
+${error}
+
+Stack:
+${error.stack || "スタックトレースなし"}`;
+            this.lineMessagingDriver.replyMessage(event.replyToken, errorMessage);
+          }
+        } catch (replyError) {
+          Logger.log(`Failed to send error message: ${replyError}`);
+        }
       }
+    }
+    /**
+     * メッセージから年月を抽出
+     * - 「支払い」のみ → 今月
+     * - 「支払い10月」「支払10月」 → 今年の指定月
+     * - 「支払い2024年10月」 → 指定年月
+     */
+    extractYearMonth(messageText) {
+      const now = /* @__PURE__ */ new Date();
+      const currentYear = now.getFullYear();
+      const yearMonthMatch = messageText.match(/(\d{4})年(\d{1,2})月/);
+      if (yearMonthMatch) {
+        const year = parseInt(yearMonthMatch[1], 10);
+        const month = parseInt(yearMonthMatch[2], 10);
+        return new YearMonth(year, month);
+      }
+      const monthMatch = messageText.match(/(\d{1,2})月/);
+      if (monthMatch) {
+        const month = parseInt(monthMatch[1], 10);
+        return new YearMonth(currentYear, month);
+      }
+      return YearMonth.fromDate(now);
+    }
+    /**
+     * メッセージに月の指定があるかチェック
+     */
+    hasMonthSpecification(messageText) {
+      return /(\d{4})年(\d{1,2})月/.test(messageText) || /(\d{1,2})月/.test(messageText);
+    }
+    /**
+     * 建て替え記録を整形して返す
+     * 例: 「建て替え10月」→ 8月26日〜9月25日の記録
+     */
+    formatAdvancePaymentRecords(messageText) {
+      const paymentMonth = this.extractYearMonth(messageText);
+      const paymentYear = paymentMonth.getYear();
+      const paymentMonthNum = paymentMonth.getMonth();
+      const startDate = new Date(paymentYear, paymentMonthNum - 2, 26);
+      const endDate = new Date(paymentYear, paymentMonthNum - 1, 25);
+      const payments = this.advancePaymentRepository.findByDateRange(startDate, endDate);
+      if (payments.length === 0) {
+        return `【${paymentMonth.format()}支払い分】
+建て替え記録がありません。`;
+      }
+      let husbandTotal = 0;
+      let wifeTotal = 0;
+      payments.forEach((payment) => {
+        const amount = payment.getAmount().getValue();
+        if (payment.getPayer().getValue() === "夫") {
+          husbandTotal += amount;
+        } else {
+          wifeTotal += amount;
+        }
+      });
+      const diff = Math.abs(husbandTotal - wifeTotal);
+      const halfDiff = Math.floor(diff / 2);
+      let message = `📝 建て替え記録
+【${paymentMonth.format()}支払い分】
+`;
+      message += `期間: ${this.formatDate(startDate)} 〜 ${this.formatDate(endDate)}
+
+`;
+      message += "--- 記録 ---\n";
+      payments.forEach((payment) => {
+        const dateStr = payment.getFormattedDate();
+        const payer = payment.getPayer().getValue();
+        const amount = payment.getAmount().format();
+        const memo = payment.getMemo();
+        message += `${dateStr} ${payer === "夫" ? "👨" : "👩"} ${amount}
+${memo}
+
+`;
+      });
+      message += "--- 合計 ---\n";
+      message += `👨 夫: ${this.formatMoney(husbandTotal)}
+`;
+      message += `👩 妻: ${this.formatMoney(wifeTotal)}
+
+`;
+      message += "--- 清算 ---\n";
+      if (husbandTotal > wifeTotal) {
+        message += `👩 妻 → 👨 夫: ${this.formatMoney(halfDiff)}`;
+      } else if (wifeTotal > husbandTotal) {
+        message += `👨 夫 → 👩 妻: ${this.formatMoney(halfDiff)}`;
+      } else {
+        message += "差額なし";
+      }
+      return message;
+    }
+    /**
+     * Date を YYYY-MM-DD 形式にフォーマット
+     */
+    formatDate(date) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
+    /**
+     * 金額を円表記にフォーマット
+     */
+    formatMoney(amount) {
+      return `${amount.toLocaleString()}円`;
     }
   }
   class TestHandler {
@@ -1172,14 +1318,108 @@ ${webAppUrl}`;
 </html>`;
     return HtmlService.createHtmlOutput(htmlContent).setTitle("建て替え記録").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
+  function testWriteToSheet() {
+    try {
+      const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
+      Logger.log("SPREADSHEET_ID: " + spreadsheetId);
+      if (!spreadsheetId) {
+        Logger.log("ERROR: SPREADSHEET_ID not set");
+        return;
+      }
+      const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+      Logger.log("Spreadsheet opened: " + spreadsheet.getName());
+      let sheet = spreadsheet.getSheetByName("DebugLog");
+      if (!sheet) {
+        Logger.log("Creating DebugLog sheet...");
+        sheet = spreadsheet.insertSheet("DebugLog");
+        sheet.appendRow(["Timestamp", "Message"]);
+        sheet.getRange(1, 1, 1, 2).setFontWeight("bold");
+      }
+      const timestamp = (/* @__PURE__ */ new Date()).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+      sheet.appendRow([timestamp, "TEST: testWriteToSheet executed successfully"]);
+      Logger.log("Successfully wrote to sheet!");
+    } catch (error) {
+      Logger.log("ERROR: " + error);
+      Logger.log("Stack: " + (error.stack || "No stack"));
+    }
+  }
   function doPost(e) {
-    const zaimApiDriver = new ZaimApiDriver();
+    var _a, _b;
     const lineMessagingDriver = new LineMessagingDriver();
-    const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
-    const settlementCalculator = new SettlementCalculator();
-    const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
-    const handler = new LineWebhookHandler(useCase, lineMessagingDriver);
-    handler.handleRequest(e.postData.contents);
+    let replyToken = null;
+    try {
+      Logger.log("doPost called");
+      Logger.log("e: " + JSON.stringify(e));
+      if (!e || !e.postData || !e.postData.contents) {
+        Logger.log("Error: Invalid request data");
+        return;
+      }
+      Logger.log("postData.contents: " + e.postData.contents);
+      const json = JSON.parse(e.postData.contents);
+      const event = (_a = json.events) == null ? void 0 : _a[0];
+      if (!event) {
+        Logger.log("No event found");
+        return;
+      }
+      replyToken = event.replyToken;
+      const messageText = ((_b = event.message) == null ? void 0 : _b.text) || "";
+      Logger.log("messageText: " + messageText);
+      Logger.log("replyToken: " + replyToken);
+      if (messageText.toLowerCase().includes("hello")) {
+        Logger.log("Hello detected, replying synchronously");
+        if (replyToken) {
+          try {
+            const debugInfo = `hello
+
+[DEBUG]
+doPost: OK
+messageText: ${messageText}
+replyToken: ${replyToken}`;
+            lineMessagingDriver.replyMessage(replyToken, debugInfo);
+            Logger.log("Reply sent");
+          } catch (helloError) {
+            Logger.log("Error sending hello: " + helloError);
+            const errorInfo = `Error sending hello:
+${helloError}
+
+Stack:
+${helloError.stack || "No stack"}`;
+            try {
+              lineMessagingDriver.replyMessage(replyToken, errorInfo);
+            } catch (e2) {
+              Logger.log("Failed to send error: " + e2);
+            }
+          }
+        } else {
+          Logger.log("No replyToken available");
+        }
+        return;
+      }
+      const zaimApiDriver = new ZaimApiDriver();
+      const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
+      const settlementCalculator = new SettlementCalculator();
+      const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
+      const spreadsheetDriver = new SpreadsheetDriver();
+      const advancePaymentRepository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+      const handler = new LineWebhookHandler(useCase, advancePaymentRepository, lineMessagingDriver);
+      handler.handleRequest(e.postData.contents);
+    } catch (error) {
+      Logger.log("Critical error in doPost: " + error);
+      Logger.log("Stack: " + (error.stack || "No stack trace"));
+      if (replyToken) {
+        try {
+          const errorMessage = `doPost()でエラー発生:
+
+${error}
+
+Stack:
+${error.stack || "スタックトレースなし"}`;
+          lineMessagingDriver.replyMessage(replyToken, errorMessage);
+        } catch (replyError) {
+          Logger.log("Failed to send error to LINE: " + replyError);
+        }
+      }
+    }
   }
   function testHandleZaimMessage() {
     const zaimApiDriver = new ZaimApiDriver();
@@ -1247,26 +1487,28 @@ ${webAppUrl}`;
     );
     handler.deletePayment(id);
   }
-  if (typeof globalThis !== "undefined") {
-    globalThis.doGet = doGet;
-    globalThis.doPost = doPost;
-    globalThis.testHandleZaimMessage = testHandleZaimMessage;
-    globalThis.setupSpreadsheetId = setupSpreadsheetId;
-    globalThis.setupWebAppUrl = setupWebAppUrl;
-    globalThis.getPayments = getPayments;
-    globalThis.getSettlement = getSettlement;
-    globalThis.addPayment = addPayment;
-    globalThis.deletePayment = deletePayment;
-  }
+  (function(global) {
+    global.doGet = doGet;
+    global.doPost = doPost;
+    global.testHandleZaimMessage = testHandleZaimMessage;
+    global.setupSpreadsheetId = setupSpreadsheetId;
+    global.setupWebAppUrl = setupWebAppUrl;
+    global.getPayments = getPayments;
+    global.getSettlement = getSettlement;
+    global.addPayment = addPayment;
+    global.deletePayment = deletePayment;
+    global.testWriteToSheet = testWriteToSheet;
+  })(this);
 })();
 
-// Export GasApp functions to global scope for GAS
-var doGet = GasApp.doGet;
-var doPost = GasApp.doPost;
-var testHandleZaimMessage = GasApp.testHandleZaimMessage;
-var setupSpreadsheetId = GasApp.setupSpreadsheetId;
-var setupWebAppUrl = GasApp.setupWebAppUrl;
-var getPayments = GasApp.getPayments;
-var getSettlement = GasApp.getSettlement;
-var addPayment = GasApp.addPayment;
-var deletePayment = GasApp.deletePayment;
+// Ensure functions are in global scope for GAS
+function doGet(e) { return this.doGet(e); }
+function doPost(e) { return this.doPost(e); }
+function testHandleZaimMessage() { return this.testHandleZaimMessage(); }
+function setupSpreadsheetId() { return this.setupSpreadsheetId(); }
+function setupWebAppUrl() { return this.setupWebAppUrl(); }
+function getPayments() { return this.getPayments(); }
+function getSettlement() { return this.getSettlement(); }
+function addPayment(a, b, c, d) { return this.addPayment(a, b, c, d); }
+function deletePayment(a) { return this.deletePayment(a); }
+function testWriteToSheet() { return this.testWriteToSheet(); }

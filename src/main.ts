@@ -175,20 +175,189 @@ function doGet(): GoogleAppsScript.HTML.HtmlOutput {
 }
 
 /**
+ * スプレッドシート書き込みテスト用
+ * GASエディタで直接実行してテストする
+ */
+function testWriteToSheet(): void {
+  try {
+    const spreadsheetId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+    Logger.log('SPREADSHEET_ID: ' + spreadsheetId);
+
+    if (!spreadsheetId) {
+      Logger.log('ERROR: SPREADSHEET_ID not set');
+      return;
+    }
+
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    Logger.log('Spreadsheet opened: ' + spreadsheet.getName());
+
+    let sheet = spreadsheet.getSheetByName('DebugLog');
+
+    if (!sheet) {
+      Logger.log('Creating DebugLog sheet...');
+      sheet = spreadsheet.insertSheet('DebugLog');
+      sheet.appendRow(['Timestamp', 'Message']);
+      sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+    }
+
+    const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+    sheet.appendRow([timestamp, 'TEST: testWriteToSheet executed successfully']);
+    Logger.log('Successfully wrote to sheet!');
+  } catch (error: any) {
+    Logger.log('ERROR: ' + error);
+    Logger.log('Stack: ' + (error.stack || 'No stack'));
+  }
+}
+
+/*
+// シンプル版doPost（テスト用・コメントアウト）
+function doPost_simple(e: any): void {
+  // 最初に必ずスプレッドシートに書き込む
+  try {
+    const spreadsheetId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    let sheet = spreadsheet.getSheetByName('DebugLog');
+
+    if (!sheet) {
+      sheet = spreadsheet.insertSheet('DebugLog');
+      sheet.appendRow(['Timestamp', 'Message']);
+      sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+    }
+
+    const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+    sheet.appendRow([timestamp, 'doPost called - hello received']);
+
+    // LINEに返信
+    try {
+      const json = JSON.parse(e.postData.contents);
+      const event = json.events[0];
+      const replyToken = event.replyToken;
+      const lineToken = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+
+      if (lineToken && replyToken) {
+        const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+          headers: {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'Authorization': 'Bearer ' + lineToken
+          },
+          method: 'post',
+          payload: JSON.stringify({
+            replyToken: replyToken,
+            messages: [{
+              type: 'text',
+              text: 'hello1'
+            }]
+          }),
+          muteHttpExceptions: true
+        };
+
+        const response = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', options);
+        const responseCode = response.getResponseCode();
+        const responseText = response.getContentText();
+
+        sheet.appendRow([timestamp, `LINE API Response: ${responseCode} - ${responseText}`]);
+
+        if (responseCode !== 200) {
+          sheet.appendRow([timestamp, `ERROR: ${responseText}`]);
+        }
+      } else {
+        sheet.appendRow([timestamp, 'ERROR: Missing lineToken or replyToken']);
+      }
+    } catch (error: any) {
+      sheet.appendRow([timestamp, `ERROR: ${error}`]);
+    }
+  } catch (sheetError: any) {
+    Logger.log('Failed to write to sheet: ' + sheetError);
+  }
+}
+*/
+
+/**
  * LINE Webhook エンドポイント
- * LINEからのメッセージを受信して返信する
  */
 function doPost(e: any): void {
-  // 依存関係を組み立て
-  const zaimApiDriver = new ZaimApiDriver();
   const lineMessagingDriver = new LineMessagingDriver();
-  const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
-  const settlementCalculator = new SettlementCalculator();
-  const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
-  const handler = new LineWebhookHandler(useCase, lineMessagingDriver);
+  let replyToken: string | null = null;
 
-  // リクエストを処理
-  handler.handleRequest(e.postData.contents);
+  try {
+    Logger.log('doPost called');
+    Logger.log('e: ' + JSON.stringify(e));
+
+    // postDataの存在確認
+    if (!e || !e.postData || !e.postData.contents) {
+      Logger.log('Error: Invalid request data');
+      return;
+    }
+
+    Logger.log('postData.contents: ' + e.postData.contents);
+
+    // JSONパース
+    const json = JSON.parse(e.postData.contents);
+    const event = json.events?.[0];
+
+    if (!event) {
+      Logger.log('No event found');
+      return;
+    }
+
+    replyToken = event.replyToken;
+    const messageText = event.message?.text || '';
+
+    Logger.log('messageText: ' + messageText);
+    Logger.log('replyToken: ' + replyToken);
+
+    // helloの場合は同期的に即座に返信
+    if (messageText.toLowerCase().includes('hello')) {
+      Logger.log('Hello detected, replying synchronously');
+      if (replyToken) {
+        try {
+          // デバッグ情報を含めて返信
+          const debugInfo = `hello\n\n[DEBUG]\ndoPost: OK\nmessageText: ${messageText}\nreplyToken: ${replyToken}`;
+          lineMessagingDriver.replyMessage(replyToken, debugInfo);
+          Logger.log('Reply sent');
+        } catch (helloError: any) {
+          Logger.log('Error sending hello: ' + helloError);
+          // エラーもLINEに送信
+          const errorInfo = `Error sending hello:\n${helloError}\n\nStack:\n${helloError.stack || 'No stack'}`;
+          try {
+            lineMessagingDriver.replyMessage(replyToken, errorInfo);
+          } catch (e) {
+            Logger.log('Failed to send error: ' + e);
+          }
+        }
+      } else {
+        Logger.log('No replyToken available');
+      }
+      return;
+    }
+
+    // それ以外の場合は非同期ハンドラーに渡す
+    const zaimApiDriver = new ZaimApiDriver();
+    const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
+    const settlementCalculator = new SettlementCalculator();
+    const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
+
+    // 建て替え記録リポジトリ
+    const spreadsheetDriver = new SpreadsheetDriver();
+    const advancePaymentRepository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+
+    const handler = new LineWebhookHandler(useCase, advancePaymentRepository, lineMessagingDriver);
+
+    handler.handleRequest(e.postData.contents);
+  } catch (error: any) {
+    Logger.log('Critical error in doPost: ' + error);
+    Logger.log('Stack: ' + (error.stack || 'No stack trace'));
+
+    // エラーをLINEに返信
+    if (replyToken) {
+      try {
+        const errorMessage = `doPost()でエラー発生:\n\n${error}\n\nStack:\n${error.stack || 'スタックトレースなし'}`;
+        lineMessagingDriver.replyMessage(replyToken, errorMessage);
+      } catch (replyError) {
+        Logger.log('Failed to send error to LINE: ' + replyError);
+      }
+    }
+  }
 }
 
 /**
@@ -286,14 +455,16 @@ function deletePayment(id: string): void {
 }
 
 // Export functions to global scope for GAS
-if (typeof globalThis !== 'undefined') {
-  (globalThis as any).doGet = doGet;
-  (globalThis as any).doPost = doPost;
-  (globalThis as any).testHandleZaimMessage = testHandleZaimMessage;
-  (globalThis as any).setupSpreadsheetId = setupSpreadsheetId;
-  (globalThis as any).setupWebAppUrl = setupWebAppUrl;
-  (globalThis as any).getPayments = getPayments;
-  (globalThis as any).getSettlement = getSettlement;
-  (globalThis as any).addPayment = addPayment;
-  (globalThis as any).deletePayment = deletePayment;
-}
+// Use 'this' in global context to ensure GAS can find these functions
+(function(global: any) {
+  global.doGet = doGet;
+  global.doPost = doPost;
+  global.testHandleZaimMessage = testHandleZaimMessage;
+  global.setupSpreadsheetId = setupSpreadsheetId;
+  global.setupWebAppUrl = setupWebAppUrl;
+  global.getPayments = getPayments;
+  global.getSettlement = getSettlement;
+  global.addPayment = addPayment;
+  global.deletePayment = deletePayment;
+  global.testWriteToSheet = testWriteToSheet;
+})(this);

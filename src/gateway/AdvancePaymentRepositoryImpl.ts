@@ -48,6 +48,14 @@ export class AdvancePaymentRepositoryImpl implements IAdvancePaymentRepository {
     return all.filter((payment) => payment.isInMonth(year, month));
   }
 
+  findByDateRange(startDate: Date, endDate: Date): AdvancePayment[] {
+    const all = this.findAll();
+    return all.filter((payment) => {
+      const paymentDate = payment.getDate();
+      return paymentDate >= startDate && paymentDate <= endDate;
+    });
+  }
+
   add(payment: AdvancePayment): void {
     const row = this.advancePaymentToRow(payment);
     this.spreadsheetDriver.appendRow(row);

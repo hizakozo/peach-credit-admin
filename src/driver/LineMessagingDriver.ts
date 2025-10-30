@@ -10,27 +10,39 @@ export class LineMessagingDriver {
    * @param message 送信するメッセージ
    */
   replyMessage(replyToken: string, message: string): void {
-    const lineToken = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    try {
+      Logger.log(`[LineMessagingDriver] Sending message: ${message}`);
+      Logger.log(`[LineMessagingDriver] replyToken: ${replyToken}`);
 
-    if (!lineToken) {
-      throw new Error('LINE_CHANNEL_ACCESS_TOKEN not configured in Script Properties');
+      const lineToken = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+      Logger.log(`[LineMessagingDriver] LINE_CHANNEL_ACCESS_TOKEN exists: ${!!lineToken}`);
+
+      if (!lineToken) {
+        throw new Error('LINE_CHANNEL_ACCESS_TOKEN not configured in Script Properties');
+      }
+
+      const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+        headers: {
+          'Content-Type': 'application/json; charset=UTF-8',
+          'Authorization': 'Bearer ' + lineToken
+        },
+        method: 'post',
+        payload: JSON.stringify({
+          replyToken: replyToken,
+          messages: [{
+            type: 'text',
+            text: message
+          }]
+        })
+      };
+
+      const response = UrlFetchApp.fetch(this.LINE_URL, options);
+      Logger.log(`[LineMessagingDriver] Response code: ${response.getResponseCode()}`);
+      Logger.log(`[LineMessagingDriver] Response: ${response.getContentText()}`);
+    } catch (error: any) {
+      Logger.log(`[LineMessagingDriver] Error: ${error}`);
+      Logger.log(`[LineMessagingDriver] Stack: ${error.stack || 'No stack'}`);
+      throw error;
     }
-
-    const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
-      headers: {
-        'Content-Type': 'application/json; charset=UTF-8',
-        'Authorization': 'Bearer ' + lineToken
-      },
-      method: 'post',
-      payload: JSON.stringify({
-        replyToken: replyToken,
-        messages: [{
-          type: 'text',
-          text: message
-        }]
-      })
-    };
-
-    UrlFetchApp.fetch(this.LINE_URL, options);
   }
 }

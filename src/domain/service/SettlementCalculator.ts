@@ -17,6 +17,6 @@ export class SettlementCalculator {
     // 50%ずつに分割（切り捨て）
     const halfAmount = totalAmount.divide(2);
 
-    return new MonthlySettlement(yearMonth, halfAmount, halfAmount);
+    return new MonthlySettlement(yearMonth, totalAmount, halfAmount, halfAmount);
   }
 }

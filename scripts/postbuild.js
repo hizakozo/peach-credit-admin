@@ -1,25 +1,29 @@
 /**
  * ビルド後処理スクリプト
- * GASAppオブジェクトの関数をグローバルスコープに公開
+ * IIFEの戻り値から関数を抽出してグローバルスコープに公開（GAS用）
  */
 const fs = require('fs');
 const path = require('path');
 
 const filePath = path.join(__dirname, '../gas-dist/main.js');
-const content = fs.readFileSync(filePath, 'utf-8');
+let content = fs.readFileSync(filePath, 'utf-8');
 
-// グローバル関数を追加
+// IIFE の最後を修正: void 0 を this に置き換え
+content = content.replace(/\}\)\(void 0\);/, '})(this);');
+
+// 追加のグローバル関数定義
 const globalFunctions = `
-// Export GasApp functions to global scope for GAS
-var doGet = GasApp.doGet;
-var doPost = GasApp.doPost;
-var testHandleZaimMessage = GasApp.testHandleZaimMessage;
-var setupSpreadsheetId = GasApp.setupSpreadsheetId;
-var setupWebAppUrl = GasApp.setupWebAppUrl;
-var getPayments = GasApp.getPayments;
-var getSettlement = GasApp.getSettlement;
-var addPayment = GasApp.addPayment;
-var deletePayment = GasApp.deletePayment;
+// Ensure functions are in global scope for GAS
+function doGet(e) { return this.doGet(e); }
+function doPost(e) { return this.doPost(e); }
+function testHandleZaimMessage() { return this.testHandleZaimMessage(); }
+function setupSpreadsheetId() { return this.setupSpreadsheetId(); }
+function setupWebAppUrl() { return this.setupWebAppUrl(); }
+function getPayments() { return this.getPayments(); }
+function getSettlement() { return this.getSettlement(); }
+function addPayment(a, b, c, d) { return this.addPayment(a, b, c, d); }
+function deletePayment(a) { return this.deletePayment(a); }
+function testWriteToSheet() { return this.testWriteToSheet(); }
 `;
 
 const newContent = content + globalFunctions;

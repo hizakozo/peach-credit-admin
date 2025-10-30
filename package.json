@@ -10,7 +10,7 @@
     "build": "tsc",
     "build:gas": "vite build && cp src/appsscript.json gas-dist/ && node scripts/postbuild.js",
     "push:gas": "clasp push --force",
-    "deploy:gas": "npm run build:gas && npm run push:gas",
+    "deploy:gas": "npm run build:gas && npm run push:gas && clasp deploy -i AKfycby4B5Z8O9sJFt7QUzLDapGZM0gTWL4Czoh4Ex_C4rtUjmLu8OnvTlaNUPzSQotz5zAw -d \"Auto deployment\"",
     "check": "tsc --noEmit"
   },
   "keywords": [],
