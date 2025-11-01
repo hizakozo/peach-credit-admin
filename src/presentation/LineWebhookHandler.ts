@@ -1,7 +1,20 @@
 import { GetCreditCardAmountUseCase } from '../usecase/GetCreditCardAmountUseCase';
+import { AddAdvancePaymentUseCase } from '../usecase/AddAdvancePaymentUseCase';
+import { DeleteAdvancePaymentUseCase } from '../usecase/DeleteAdvancePaymentUseCase';
 import { LineMessagingDriver } from '../driver/LineMessagingDriver';
 import { YearMonth } from '../domain/model/YearMonth';
 import { IAdvancePaymentRepository } from '../domain/repository/IAdvancePaymentRepository';
+import { Payer } from '../domain/model/Payer';
+
+/**
+ * 建て替え記録追加メッセージのパース結果
+ */
+interface ParsedAdvancePayment {
+  date: Date;
+  payer: Payer;
+  amount: number;
+  memo: string;
+}
 
 /**
  * LINE Webhook リクエストを処理するハンドラー
@@ -10,6 +23,8 @@ export class LineWebhookHandler {
   constructor(
     private readonly getCreditCardAmountUseCase: GetCreditCardAmountUseCase,
     private readonly advancePaymentRepository: IAdvancePaymentRepository,
+    private readonly addAdvancePaymentUseCase: AddAdvancePaymentUseCase,
+    private readonly deleteAdvancePaymentUseCase: DeleteAdvancePaymentUseCase,
     private readonly lineMessagingDriver: LineMessagingDriver
   ) {}
 
@@ -31,7 +46,19 @@ export class LineWebhookHandler {
       // メッセージ内容に応じた処理
       let responseMessage: string | null = null;
 
-      if (messageText.includes('支払')) {
+      if (messageText.includes('使い方')) {
+        // 全体的な使い方を表示
+        responseMessage = this.getOverallUsageHelp();
+      } else if (messageText.includes('フォーマット')) {
+        // 建て替え追加のフォーマットを表示
+        responseMessage = this.getAdvancePaymentAdditionHelp();
+      } else if (messageText.includes('削除')) {
+        // 建て替え記録を削除
+        responseMessage = this.handleAdvancePaymentDeletion(messageText);
+      } else if (messageText.includes('建て替え追加')) {
+        // 建て替え記録を追加
+        responseMessage = this.handleAdvancePaymentAddition(messageText);
+      } else if (messageText.includes('カード支払い')) {
         // メッセージから年月を抽出
         const yearMonth = this.extractYearMonth(messageText);
         const settlement = await this.getCreditCardAmountUseCase.execute(yearMonth);
@@ -81,9 +108,9 @@ export class LineWebhookHandler {
 
   /**
    * メッセージから年月を抽出
-   * - 「支払い」のみ → 今月
-   * - 「支払い10月」「支払10月」 → 今年の指定月
-   * - 「支払い2024年10月」 → 指定年月
+   * - 「カード支払い」のみ → 今月
+   * - 「カード支払い10月」 → 今年の指定月
+   * - 「カード支払い2024年10月」 → 指定年月
    */
   private extractYearMonth(messageText: string): YearMonth {
     const now = new Date();
@@ -160,11 +187,12 @@ export class LineWebhookHandler {
     message += '--- 記録 ---\n';
 
     payments.forEach((payment) => {
+      const id = payment.getId();
       const dateStr = payment.getFormattedDate();
       const payer = payment.getPayer().getValue();
       const amount = payment.getAmount().format();
       const memo = payment.getMemo();
-      message += `${dateStr} ${payer === '夫' ? '👨' : '👩'} ${amount}\n${memo}\n\n`;
+      message += `[ID: ${id}]\n${dateStr} ${payer === '夫' ? '👨' : '👩'} ${amount}\n${memo}\n\n`;
     });
 
     message += '--- 合計 ---\n';
@@ -198,5 +226,197 @@ export class LineWebhookHandler {
    */
   private formatMoney(amount: number): string {
     return `${amount.toLocaleString()}円`;
+  }
+
+  /**
+   * 建て替え記録追加メッセージをパース
+   * フォーマット:
+   * - 建て替え追加 支払者 金額 メモ
+   * - 建て替え追加 日付 支払者 金額 メモ
+   *
+   * @returns パース結果、失敗時はnull
+   */
+  private parseAdvancePaymentMessage(messageText: string): ParsedAdvancePayment | null {
+    // 「建て替え追加」を除去
+    const content = messageText.replace(/建て替え追加\s*/, '').trim();
+    if (!content) {
+      return null;
+    }
+
+    // 空白で分割
+    const parts = content.split(/\s+/);
+    if (parts.length < 3) {
+      return null; // 最低でも 支払者、金額、メモ が必要
+    }
+
+    let dateStr: string | null = null;
+    let payerStr: string;
+    let amountStr: string;
+    let memo: string;
+
+    // 最初の部分が日付かチェック（MM/DD or M/D 形式）
+    const datePattern = /^(\d{1,2})\/(\d{1,2})$/;
+    const dateMatch = parts[0].match(datePattern);
+
+    if (dateMatch) {
+      // 日付指定あり
+      dateStr = parts[0];
+      if (parts.length < 4) {
+        return null; // 日付、支払者、金額、メモ が必要
+      }
+      payerStr = parts[1];
+      amountStr = parts[2];
+      memo = parts.slice(3).join(' ');
+    } else {
+      // 日付指定なし
+      payerStr = parts[0];
+      amountStr = parts[1];
+      memo = parts.slice(2).join(' ');
+    }
+
+    // 日付のパース
+    let date: Date;
+    if (dateStr) {
+      const match = dateStr.match(datePattern)!;
+      const month = parseInt(match[1], 10);
+      const day = parseInt(match[2], 10);
+      const now = new Date();
+      date = new Date(now.getFullYear(), month - 1, day);
+    } else {
+      date = new Date(); // 今日
+    }
+
+    // 支払者のパース
+    let payer: Payer;
+    if (payerStr === '夫') {
+      payer = Payer.HUSBAND;
+    } else if (payerStr === '妻') {
+      payer = Payer.WIFE;
+    } else {
+      return null; // 支払者が無効
+    }
+
+    // 金額のパース
+    const amount = parseInt(amountStr, 10);
+    if (isNaN(amount) || amount <= 0) {
+      return null; // 金額が無効
+    }
+
+    // メモの検証
+    if (!memo || memo.trim() === '') {
+      return null; // メモが空
+    }
+
+    return { date, payer, amount, memo: memo.trim() };
+  }
+
+  /**
+   * 全体的な使い方のヘルプメッセージ
+   */
+  private getOverallUsageHelp(): string {
+    let message = '📖 家計管理Bot 使い方\n\n';
+
+    message += '【💳 カード支払い確認】\n';
+    message += 'カード支払い → 今月の支払い額を表示\n';
+    message += 'カード支払い10月 → 10月の支払い額を表示\n';
+    message += 'カード支払い2024年10月 → 指定年月の支払い額を表示\n\n';
+
+    message += '【📝 建て替え記録】\n';
+    message += '建て替え → 記録アプリのURLを表示\n';
+    message += '建て替え11月 → 11月支払い分の記録を表示\n';
+    message += '（期間: 9/26〜10/25）\n\n';
+
+    message += '【➕ 記録追加】\n';
+    message += '建て替え追加 夫 1000 ランチ代\n';
+    message += '建て替え追加 10/30 妻 2000 買い物\n';
+    message += 'フォーマット → 詳しい使い方\n\n';
+
+    message += '【🗑️ 記録削除】\n';
+    message += '削除 ${ID} → 指定IDの記録を削除\n';
+    message += '（IDは建て替え記録から確認）\n\n';
+
+    message += '【ℹ️ その他】\n';
+    message += '使い方 → このメッセージを表示\n';
+    message += 'フォーマット → 記録追加の詳細';
+
+    return message;
+  }
+
+  /**
+   * 建て替え記録追加のヘルプメッセージ
+   */
+  private getAdvancePaymentAdditionHelp(errorReason?: string): string {
+    let message = '📝 建て替え記録の追加方法\n\n';
+
+    if (errorReason) {
+      message += `❌ エラー: ${errorReason}\n\n`;
+    }
+
+    message += '【フォーマット】\n';
+    message += '建て替え追加 支払者 金額 メモ\n';
+    message += '建て替え追加 日付 支払者 金額 メモ\n\n';
+    message += '【例】\n';
+    message += '建て替え追加 夫 1000 ランチ代\n';
+    message += '建て替え追加 10/30 妻 2000 買い物\n\n';
+    message += '【注意】\n';
+    message += '- 支払者: 「夫」または「妻」（必須）\n';
+    message += '- 金額: 数字のみ（必須）\n';
+    message += '- 日付: MM/DD形式（省略時=今日）\n';
+    message += '- メモ: 任意のテキスト（必須）';
+
+    return message;
+  }
+
+  /**
+   * 建て替え記録を追加
+   */
+  private handleAdvancePaymentAddition(messageText: string): string {
+    // メッセージをパース
+    const parsed = this.parseAdvancePaymentMessage(messageText);
+
+    if (!parsed) {
+      return this.getAdvancePaymentAdditionHelp('入力形式が正しくありません');
+    }
+
+    try {
+      // 記録を追加
+      this.addAdvancePaymentUseCase.execute(
+        parsed.date,
+        parsed.payer,
+        parsed.amount,
+        parsed.memo
+      );
+
+      // 成功メッセージ
+      const payerIcon = parsed.payer.equals(Payer.HUSBAND) ? '👨' : '👩';
+      const dateStr = this.formatDate(parsed.date);
+      return `✅ 記録しました\n\n${dateStr} ${payerIcon} ${this.formatMoney(parsed.amount)}\n${parsed.memo}`;
+    } catch (error: any) {
+      Logger.log(`Error adding advance payment: ${error}`);
+      return `❌ 記録の追加に失敗しました\n\n${error}`;
+    }
+  }
+
+  /**
+   * 建て替え記録を削除
+   * フォーマット: 削除 ${ID}
+   */
+  private handleAdvancePaymentDeletion(messageText: string): string {
+    // 「削除」を除去してIDを取得
+    const id = messageText.replace(/削除\s*/, '').trim();
+
+    if (!id) {
+      return '❌ 削除するIDを指定してください\n\n使い方: 削除 ${ID}\n例: 削除 1234567890';
+    }
+
+    try {
+      // 記録を削除
+      this.deleteAdvancePaymentUseCase.execute(id);
+
+      return `✅ 記録を削除しました\n\nID: ${id}`;
+    } catch (error: any) {
+      Logger.log(`Error deleting advance payment: ${error}`);
+      return `❌ 記録の削除に失敗しました\n\nID: ${id}\n\n${error}`;
+    }
   }
 }

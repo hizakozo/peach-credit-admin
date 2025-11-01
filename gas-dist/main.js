@@ -598,9 +598,11 @@
     }
   }
   class LineWebhookHandler {
-    constructor(getCreditCardAmountUseCase, advancePaymentRepository, lineMessagingDriver) {
+    constructor(getCreditCardAmountUseCase, advancePaymentRepository, addAdvancePaymentUseCase, deleteAdvancePaymentUseCase, lineMessagingDriver) {
       this.getCreditCardAmountUseCase = getCreditCardAmountUseCase;
       this.advancePaymentRepository = advancePaymentRepository;
+      this.addAdvancePaymentUseCase = addAdvancePaymentUseCase;
+      this.deleteAdvancePaymentUseCase = deleteAdvancePaymentUseCase;
       this.lineMessagingDriver = lineMessagingDriver;
     }
     /**
@@ -617,7 +619,15 @@
         const replyToken = event.replyToken;
         const messageText = ((_a = event.message) == null ? void 0 : _a.text) || "";
         let responseMessage = null;
-        if (messageText.includes("支払")) {
+        if (messageText.includes("使い方")) {
+          responseMessage = this.getOverallUsageHelp();
+        } else if (messageText.includes("フォーマット")) {
+          responseMessage = this.getAdvancePaymentAdditionHelp();
+        } else if (messageText.includes("削除")) {
+          responseMessage = this.handleAdvancePaymentDeletion(messageText);
+        } else if (messageText.includes("建て替え追加")) {
+          responseMessage = this.handleAdvancePaymentAddition(messageText);
+        } else if (messageText.includes("カード支払い")) {
           const yearMonth = this.extractYearMonth(messageText);
           const settlement = await this.getCreditCardAmountUseCase.execute(yearMonth);
           responseMessage = settlement.formatMessage();
@@ -665,9 +675,9 @@ ${error.stack || "スタックトレースなし"}`;
     }
     /**
      * メッセージから年月を抽出
-     * - 「支払い」のみ → 今月
-     * - 「支払い10月」「支払10月」 → 今年の指定月
-     * - 「支払い2024年10月」 → 指定年月
+     * - 「カード支払い」のみ → 今月
+     * - 「カード支払い10月」 → 今年の指定月
+     * - 「カード支払い2024年10月」 → 指定年月
      */
     extractYearMonth(messageText) {
       const now = /* @__PURE__ */ new Date();
@@ -726,11 +736,13 @@ ${error.stack || "スタックトレースなし"}`;
 `;
       message += "--- 記録 ---\n";
       payments.forEach((payment) => {
+        const id = payment.getId();
         const dateStr = payment.getFormattedDate();
         const payer = payment.getPayer().getValue();
         const amount = payment.getAmount().format();
         const memo = payment.getMemo();
-        message += `${dateStr} ${payer === "夫" ? "👨" : "👩"} ${amount}
+        message += `[ID: ${id}]
+${dateStr} ${payer === "夫" ? "👨" : "👩"} ${amount}
 ${memo}
 
 `;
@@ -765,6 +777,168 @@ ${memo}
      */
     formatMoney(amount) {
       return `${amount.toLocaleString()}円`;
+    }
+    /**
+     * 建て替え記録追加メッセージをパース
+     * フォーマット:
+     * - 建て替え追加 支払者 金額 メモ
+     * - 建て替え追加 日付 支払者 金額 メモ
+     *
+     * @returns パース結果、失敗時はnull
+     */
+    parseAdvancePaymentMessage(messageText) {
+      const content = messageText.replace(/建て替え追加\s*/, "").trim();
+      if (!content) {
+        return null;
+      }
+      const parts = content.split(/\s+/);
+      if (parts.length < 3) {
+        return null;
+      }
+      let dateStr = null;
+      let payerStr;
+      let amountStr;
+      let memo;
+      const datePattern = /^(\d{1,2})\/(\d{1,2})$/;
+      const dateMatch = parts[0].match(datePattern);
+      if (dateMatch) {
+        dateStr = parts[0];
+        if (parts.length < 4) {
+          return null;
+        }
+        payerStr = parts[1];
+        amountStr = parts[2];
+        memo = parts.slice(3).join(" ");
+      } else {
+        payerStr = parts[0];
+        amountStr = parts[1];
+        memo = parts.slice(2).join(" ");
+      }
+      let date;
+      if (dateStr) {
+        const match = dateStr.match(datePattern);
+        const month = parseInt(match[1], 10);
+        const day = parseInt(match[2], 10);
+        const now = /* @__PURE__ */ new Date();
+        date = new Date(now.getFullYear(), month - 1, day);
+      } else {
+        date = /* @__PURE__ */ new Date();
+      }
+      let payer;
+      if (payerStr === "夫") {
+        payer = Payer.HUSBAND;
+      } else if (payerStr === "妻") {
+        payer = Payer.WIFE;
+      } else {
+        return null;
+      }
+      const amount = parseInt(amountStr, 10);
+      if (isNaN(amount) || amount <= 0) {
+        return null;
+      }
+      if (!memo || memo.trim() === "") {
+        return null;
+      }
+      return { date, payer, amount, memo: memo.trim() };
+    }
+    /**
+     * 全体的な使い方のヘルプメッセージ
+     */
+    getOverallUsageHelp() {
+      let message = "📖 家計管理Bot 使い方\n\n";
+      message += "【💳 カード支払い確認】\n";
+      message += "カード支払い → 今月の支払い額を表示\n";
+      message += "カード支払い10月 → 10月の支払い額を表示\n";
+      message += "カード支払い2024年10月 → 指定年月の支払い額を表示\n\n";
+      message += "【📝 建て替え記録】\n";
+      message += "建て替え → 記録アプリのURLを表示\n";
+      message += "建て替え11月 → 11月支払い分の記録を表示\n";
+      message += "（期間: 9/26〜10/25）\n\n";
+      message += "【➕ 記録追加】\n";
+      message += "建て替え追加 夫 1000 ランチ代\n";
+      message += "建て替え追加 10/30 妻 2000 買い物\n";
+      message += "フォーマット → 詳しい使い方\n\n";
+      message += "【🗑️ 記録削除】\n";
+      message += "削除 ${ID} → 指定IDの記録を削除\n";
+      message += "（IDは建て替え記録から確認）\n\n";
+      message += "【ℹ️ その他】\n";
+      message += "使い方 → このメッセージを表示\n";
+      message += "フォーマット → 記録追加の詳細";
+      return message;
+    }
+    /**
+     * 建て替え記録追加のヘルプメッセージ
+     */
+    getAdvancePaymentAdditionHelp(errorReason) {
+      let message = "📝 建て替え記録の追加方法\n\n";
+      if (errorReason) {
+        message += `❌ エラー: ${errorReason}
+
+`;
+      }
+      message += "【フォーマット】\n";
+      message += "建て替え追加 支払者 金額 メモ\n";
+      message += "建て替え追加 日付 支払者 金額 メモ\n\n";
+      message += "【例】\n";
+      message += "建て替え追加 夫 1000 ランチ代\n";
+      message += "建て替え追加 10/30 妻 2000 買い物\n\n";
+      message += "【注意】\n";
+      message += "- 支払者: 「夫」または「妻」（必須）\n";
+      message += "- 金額: 数字のみ（必須）\n";
+      message += "- 日付: MM/DD形式（省略時=今日）\n";
+      message += "- メモ: 任意のテキスト（必須）";
+      return message;
+    }
+    /**
+     * 建て替え記録を追加
+     */
+    handleAdvancePaymentAddition(messageText) {
+      const parsed = this.parseAdvancePaymentMessage(messageText);
+      if (!parsed) {
+        return this.getAdvancePaymentAdditionHelp("入力形式が正しくありません");
+      }
+      try {
+        this.addAdvancePaymentUseCase.execute(
+          parsed.date,
+          parsed.payer,
+          parsed.amount,
+          parsed.memo
+        );
+        const payerIcon = parsed.payer.equals(Payer.HUSBAND) ? "👨" : "👩";
+        const dateStr = this.formatDate(parsed.date);
+        return `✅ 記録しました
+
+${dateStr} ${payerIcon} ${this.formatMoney(parsed.amount)}
+${parsed.memo}`;
+      } catch (error) {
+        Logger.log(`Error adding advance payment: ${error}`);
+        return `❌ 記録の追加に失敗しました
+
+${error}`;
+      }
+    }
+    /**
+     * 建て替え記録を削除
+     * フォーマット: 削除 ${ID}
+     */
+    handleAdvancePaymentDeletion(messageText) {
+      const id = messageText.replace(/削除\s*/, "").trim();
+      if (!id) {
+        return "❌ 削除するIDを指定してください\n\n使い方: 削除 ${ID}\n例: 削除 1234567890";
+      }
+      try {
+        this.deleteAdvancePaymentUseCase.execute(id);
+        return `✅ 記録を削除しました
+
+ID: ${id}`;
+      } catch (error) {
+        Logger.log(`Error deleting advance payment: ${error}`);
+        return `❌ 記録の削除に失敗しました
+
+ID: ${id}
+
+${error}`;
+      }
     }
   }
   class TestHandler {
@@ -1398,10 +1572,18 @@ ${helloError.stack || "No stack"}`;
       const zaimApiDriver = new ZaimApiDriver();
       const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
       const settlementCalculator = new SettlementCalculator();
-      const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
+      const getCreditCardAmountUseCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
       const spreadsheetDriver = new SpreadsheetDriver();
       const advancePaymentRepository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
-      const handler = new LineWebhookHandler(useCase, advancePaymentRepository, lineMessagingDriver);
+      const addAdvancePaymentUseCase = new AddAdvancePaymentUseCase(advancePaymentRepository);
+      const deleteAdvancePaymentUseCase = new DeleteAdvancePaymentUseCase(advancePaymentRepository);
+      const handler = new LineWebhookHandler(
+        getCreditCardAmountUseCase,
+        advancePaymentRepository,
+        addAdvancePaymentUseCase,
+        deleteAdvancePaymentUseCase,
+        lineMessagingDriver
+      );
       handler.handleRequest(e.postData.contents);
     } catch (error) {
       Logger.log("Critical error in doPost: " + error);

@@ -335,13 +335,21 @@ function doPost(e: any): void {
     const zaimApiDriver = new ZaimApiDriver();
     const creditCardRepository = new CreditCardRepositoryImpl(zaimApiDriver);
     const settlementCalculator = new SettlementCalculator();
-    const useCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
+    const getCreditCardAmountUseCase = new GetCreditCardAmountUseCase(creditCardRepository, settlementCalculator);
 
     // 建て替え記録リポジトリ
     const spreadsheetDriver = new SpreadsheetDriver();
     const advancePaymentRepository = new AdvancePaymentRepositoryImpl(spreadsheetDriver);
+    const addAdvancePaymentUseCase = new AddAdvancePaymentUseCase(advancePaymentRepository);
+    const deleteAdvancePaymentUseCase = new DeleteAdvancePaymentUseCase(advancePaymentRepository);
 
-    const handler = new LineWebhookHandler(useCase, advancePaymentRepository, lineMessagingDriver);
+    const handler = new LineWebhookHandler(
+      getCreditCardAmountUseCase,
+      advancePaymentRepository,
+      addAdvancePaymentUseCase,
+      deleteAdvancePaymentUseCase,
+      lineMessagingDriver
+    );
 
     handler.handleRequest(e.postData.contents);
   } catch (error: any) {
